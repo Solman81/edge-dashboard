@@ -387,12 +387,12 @@ function acceptForm(f, st){
     </div>
     <div class="frow">
       <label>Stake €<input type="number" inputmode="decimal" step="0.01" data-f="stake" data-id="${f.id}" value="${stake ?? ""}"></label>
-      <label>Edge<span class="calc" style="padding-top:9px">${e.toFixed(2)}% · Kelly €${auto.toFixed(2)}${b && b.max_win ? ` (cap €${b.max_win} win)` : ""}</span></label>
+      <label>Edge<span class="calc" id="calc-${f.id}" style="padding-top:9px">${e.toFixed(2)}% · Kelly €${auto.toFixed(2)}${b && b.max_win ? ` (cap €${b.max_win} win)` : ""}</span></label>
     </div>
     <label class="check"><input type="checkbox" data-f="capped" data-id="${f.id}" ${st.capped ? "checked" : ""}> Book cut my stake</label>
     ${st.capped ? `<label>Max the book offered €<input type="number" inputmode="decimal" step="0.01" data-f="max" data-id="${f.id}" value="${st.max ?? ""}"></label>` : ""}
-    ${odds && e < 1 ? `<div class="warn">Edge is ${e.toFixed(2)}%, under 1% at this price. Usually a decline.</div>` : ""}
-    <div class="acts"><button class="btn primary" data-act="accept" data-id="${f.id}" ${!(odds > 1) || !(stake > 0) ? "disabled" : ""}>Confirm bet</button>
+    <div id="lowedge-${f.id}">${odds && e < 1 ? `<div class="warn">Edge is ${e.toFixed(2)}%, under 1% at this price. Usually a decline.</div>` : ""}</div>
+    <div class="acts"><button class="btn primary" id="confirm-${f.id}" data-act="accept" data-id="${f.id}" ${!(odds > 1) || !(stake > 0) ? "disabled" : ""}>Confirm bet</button>
       <button class="btn ghost" data-act="close" data-id="${f.id}">Cancel</button></div></div>`;
 }
 async function doAccept(f){
@@ -590,6 +590,17 @@ async function saveSettings(){
   rows.forEach(r => S.settings[r.key] = r.value); toast("Settings saved"); render();
 }
 
+// update stake / edge / warnings without redrawing the card (keeps the cursor where you're typing)
+function liveAccept(id){
+  const f = S.flags.find(x => x.id == id), st = S.open[id]; if (!f || !st) return;
+  const odds = num(st.odds), fair = +f.fair_odds, auto = kelly(odds, fair, st.book);
+  const stake = st.stakeEdited ? num(st.stake) : auto, e = edgePct(odds || 0, fair), b = bookObj(st.book);
+  const si = document.querySelector(`[data-f="stake"][data-id="${id}"]`); if (si && !st.stakeEdited) si.value = auto || "";
+  const c = $("calc-" + id); if (c) c.textContent = `${e.toFixed(2)}% · Kelly €${auto.toFixed(2)}${b && b.max_win ? ` (cap €${b.max_win} win)` : ""}`;
+  const w = $("lowedge-" + id); if (w) w.innerHTML = odds && e < 1 ? `<div class="warn">Edge is ${e.toFixed(2)}%, under 1% at this price. Usually a decline.</div>` : "";
+  const cb = $("confirm-" + id); if (cb) cb.disabled = !(odds > 1) || !(stake > 0);
+  const box = $("pos-" + id); if (box) box.innerHTML = posPanel(f);
+}
 // ====================================================================== events
 document.addEventListener("click", async ev => {
   const t = ev.target.closest("[data-act],[data-tab]"); if (!t) return;
@@ -620,9 +631,9 @@ document.addEventListener("click", async ev => {
 document.addEventListener("input", ev => {
   const t = ev.target;
   if (t.dataset.f){ const st = S.open[t.dataset.id]; if (!st) return;
-    if (t.dataset.f === "odds") st.odds = t.value;
+    if (t.dataset.f === "odds"){ st.odds = t.value; liveAccept(t.dataset.id); return; }
     if (t.dataset.f === "stake"){ st.stake = t.value; st.stakeEdited = true;
-      const f = S.flags.find(x => x.id == t.dataset.id), box = $("pos-" + t.dataset.id); if (f && box) box.innerHTML = posPanel(f); return; }
+      liveAccept(t.dataset.id); return; }
     if (t.dataset.f === "max") { st.max = t.value; return; }
     if (t.dataset.f === "book") { st.book = t.value; st.stakeEdited = false; }
     if (t.dataset.f === "capped") st.capped = t.checked;
