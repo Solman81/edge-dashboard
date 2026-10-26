@@ -115,6 +115,11 @@ th{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mu
 #toast.show{opacity:1}
 .login{max-width:360px;margin:16vh auto 0;display:grid;gap:12px}
 .login h1{font-size:44px}
+.ptbl{margin-top:8px;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px}
+.ptbl .held{font-size:12.5px;margin-bottom:4px}
+.ptbl table{font-size:12.5px}
+.ptbl td,.ptbl th{padding:4px 4px}
+.ptbl tr.worst td{font-weight:600}
 [hidden]{display:none!important}
 @media (prefers-reduced-motion:reduce){#toast{transition:none}}
 </style>
@@ -205,6 +210,89 @@ function edgePct(odds, fair){ return (fair > 0 && odds > 0) ? (odds/fair - 1) * 
 function selKey(x){ return `${x.event_id}|${x.market}|${x.outcome}|${x.line === null || x.line === undefined ? "" : +x.line}`; }
 function openBets(){ return S.bets.filter(b => !b.result); }
 
+// ====================================================================== POSITION (same match, more than one bet)
+const NO_DRAW = /^(basketball|americanfootball|baseball|icehockey|tennis|mma|boxing)/;
+function betPL(b, m, t, home){            // profit of bet b if final margin (home-away) = m and total = t
+  const st = +b.stake, win = st * (+b.odds - 1), L = b.line === null || b.line === undefined ? null : +b.line;
+  let x;                                   // >0 win, 0 push, <0 loss
+  if (b.market === "h2h") x = b.outcome.toLowerCase() === "draw" ? (m === 0 ? 1 : -1) : (b.outcome === home ? m : -m);
+  else if (b.market === "totals") x = b.outcome.toLowerCase().startsWith("over") ? t - L : L - t;
+  else x = b.outcome === home ? m + L : L - m;
+  return x > 0 ? win : x < 0 ? -st : 0;
+}
+function buckets(lo, hi, vec, splitAt){   // group consecutive integers with identical P/L vectors
+  const out = [];
+  for (let v = lo; v <= hi; v++){
+    const k = vec(v); if (k === null) continue;
+    const last = out[out.length - 1];
+    if (last && last.key === k && !splitAt(last.b, v) && last.b === v - 1) last.b = v;
+    else out.push({ a:v, b:v, key:k });
+  }
+  if (out.length){ out[0].openLo = true; out[out.length - 1].openHi = true; }
+  return out;
+}
+function positionRows(f, newBet){
+  const held = openBets().filter(b => b.event_id === f.event_id);
+  const all = held.concat(newBet ? [newBet] : []);
+  const home = f.home, away = f.away, draws = !NO_DRAW.test(f.sport_key || "");
+  const useM = all.some(b => b.market !== "totals"), useT = all.some(b => b.market === "totals");
+  const mc = [0], tc = [];
+  for (const b of all){ const L = +b.line;
+    if (b.market === "spreads") mc.push(b.outcome === home ? -L : L);
+    if (b.market === "totals") tc.push(L); }
+  const mKey = m => (!draws && m === 0) ? null : all.map(b => b.market === "totals" ? 0 : betPL(b, m, 999, home)).join() + "|" + Math.sign(m);
+  const tKey = t => all.map(b => b.market === "totals" ? betPL(b, 0, t, home) : 0).join();
+  const mB = useM ? buckets(Math.floor(Math.min(...mc)) - 1, Math.ceil(Math.max(...mc)) + 1, mKey, (prev, v) => Math.sign(prev) !== Math.sign(v)) : [{ a:-99, b:99, any:true }];
+  const tB = useT ? buckets(Math.max(0, Math.floor(Math.min(...tc)) - 1), Math.ceil(Math.max(...tc)) + 1, tKey, () => false) : [{ a:0, b:999, any:true }];
+  if (useT){ tB[0].a = 0; }
+  const short = n => n.length > 14 ? n.split(" ").slice(-1)[0] : n;
+  const mLab = r => { if (r.any) return "";
+    if (r.a === 0 && r.b === 0) return "Draw";
+    if (r.a > 0) return r.openHi ? (r.a === 1 ? `${short(home)} win` : `${short(home)} by ${r.a}+`) : (r.a === r.b ? `${short(home)} by ${r.a}` : `${short(home)} by ${r.a}–${r.b}`);
+    const A = -r.b, B = -r.a;
+    return r.openLo ? (A === 1 ? `${short(away)} win` : `${short(away)} by ${A}+`) : (A === B ? `${short(away)} by ${A}` : `${short(away)} by ${A}–${B}`); };
+  const tLab = r => { if (r.any) return "";
+    if (r.openHi) return `${r.a}+ total`; if (r.a === 0 && r.openLo) return `${r.b} or fewer`;
+    return r.a === r.b ? `${r.a} total` : `${r.a}–${r.b} total`; };
+  const hiM = r => r.openHi ? r.b + 40 : r.b, loM = r => r.openLo ? r.a - 40 : r.a, hiT = r => r.openHi ? r.b + 60 : r.b;
+  const rows = [];
+  for (const mr of mB) for (const tr of tB){
+    let m0 = null, t0 = null;                // find a real score in this cell (|margin| <= total, same parity)
+    if (useM) for (let m = loM(mr); m <= hiM(mr) && m0 === null; m++){
+      if (!draws && m === 0) continue;
+      if (!useT){ m0 = m; t0 = Math.max(Math.abs(m), 1); break; }
+      for (let t = tr.a; t <= hiT(tr); t++) if (t >= Math.abs(m) && (t - m) % 2 === 0){ m0 = m; t0 = t; break; }
+    }
+    if (m0 === null && useM) continue;
+    if (!useM){ m0 = 0; t0 = tr.a; }
+    const now = held.reduce((a,b) => a + betPL(b, m0, t0, home), 0);
+    const add = newBet ? betPL(newBet, m0, t0, home) : 0;
+    rows.push({ label:[mLab(mr), tLab(tr)].filter(Boolean).join(", "), now, with: now + add, loses: add < 0 });
+  }
+  return { held, rows };
+}
+function posPanel(f){
+  const st = S.open[f.id];
+  const mine = (f.books && f.books.mine) || [];
+  let odds, stake;
+  if (st && st.mode === "accept"){ odds = num(st.odds); stake = st.stakeEdited ? num(st.stake) : kelly(odds, +f.fair_odds, st.book); }
+  else { odds = mine[0] ? +mine[0].price : +f.flag_odds; stake = mine[0] ? +mine[0].stake : kelly(odds, +f.fair_odds, f.my_book); }
+  const nb = (odds > 1 && stake > 0) ? { market:f.market, outcome:f.outcome, line:f.line, odds, stake } : null;
+  const { held, rows } = positionRows(f, nb);
+  if (!held.length) return "";
+  const worst = Math.min(...rows.map(r => r.with)), limit = 0.02 * (+setting("bankroll", 500));
+  const c = v => v > 0.005 ? "pos" : v < -0.005 ? "neg" : "";
+  const fmt = v => Math.abs(v) < 0.005 ? "€0" : sgn(v);
+  return `<div class="ptbl">
+    <div class="held"><b>You hold:</b> ${held.map(b => `${esc(pickText(b))} @ ${(+b.odds).toFixed(2)} · €${(+b.stake).toFixed(2)} ${esc(b.book)}`).join("; ")}</div>
+    <table><thead><tr><th>If it ends</th><th>Now</th><th>${nb ? `+ this €${stake.toFixed(2)}` : "+ this"}</th></tr></thead><tbody>
+    ${rows.map(r => `<tr class="${Math.abs(r.with - worst) < 0.005 ? "worst" : ""}"><td>${esc(r.label)}</td><td class="${c(r.now)}">${fmt(r.now)}</td><td class="${c(r.with)}">${fmt(r.with)}</td></tr>`).join("")}
+    </tbody></table>
+    ${nb && worst < -limit - 0.005 ? (() => { const sMax = Math.floor((limit + Math.min(...rows.filter(r => r.loses).map(r => r.now))) * 100) / 100;
+      return `<div class="warn" style="margin-top:6px">Worst case is ${eur(worst)}, over your 2-unit limit of €${limit.toFixed(2)}. ${sMax >= 0.5 ? `Max stake to stay inside it: <b>€${sMax.toFixed(2)}</b>.` : "Skip this one."}</div>`; })() : ""}
+  </div>`;
+}
+
 // ====================================================================== data
 async function loadAll(){
   const since = new Date(Date.now() - 3*3600e3).toISOString();
@@ -279,6 +367,7 @@ function flagCard(f, evOpen){
     <div class="chips">${mine.map(m => `<span class="chip">★ ${esc(m.book)} <span class="mono">${(+m.price).toFixed(2)}</span> · €${(+m.stake).toFixed(2)}${m.capped ? " capped" : ""}</span>`).join("")}
       ${!mine.length ? `<span class="chip">${esc(f.feed_book)} <span class="mono">${(+f.flag_odds).toFixed(2)}</span></span>` : ""}
       ${hints.length ? `<span class="chip">check: ${esc(hints.join(", "))}</span>` : ""}</div>
+    ${pos ? `<div id="pos-${f.id}">${posPanel(f)}</div>` : ""}
     <div class="meta"><span>Flagged at: ${feed.slice(0,5).map(x => `${esc(x.book)} ${(+x.price).toFixed(2)}`).join(", ") || esc(f.feed_book)}</span></div>
     ${body}</div>`;
 }
@@ -530,7 +619,8 @@ document.addEventListener("input", ev => {
   const t = ev.target;
   if (t.dataset.f){ const st = S.open[t.dataset.id]; if (!st) return;
     if (t.dataset.f === "odds") st.odds = t.value;
-    if (t.dataset.f === "stake"){ st.stake = t.value; st.stakeEdited = true; return; }
+    if (t.dataset.f === "stake"){ st.stake = t.value; st.stakeEdited = true;
+      const f = S.flags.find(x => x.id == t.dataset.id), box = $("pos-" + t.dataset.id); if (f && box) box.innerHTML = posPanel(f); return; }
     if (t.dataset.f === "max") { st.max = t.value; return; }
     if (t.dataset.f === "book") { st.book = t.value; st.stakeEdited = false; }
     if (t.dataset.f === "capped") st.capped = t.checked;
