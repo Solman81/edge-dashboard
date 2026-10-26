@@ -579,12 +579,13 @@ function viewSummary(){
       <label>Kelly fraction<input type="number" step="0.1" id="setKelly" value="${+setting("kelly_fraction",1)}"></label></div>
       <div class="frow"><label>Stake cap (% of bankroll)<input type="number" step="0.1" id="setCap" value="${(+setting("stake_cap_pct",0.02))*100}"></label>
       <label>Minimum edge %<input type="number" step="0.1" id="setMin" value="${+setting("min_edge_pct",1)}"></label></div>
+      <div class="frow"><label>Max odds (flag prices under)<input type="number" step="0.01" id="setMaxOdds" value="${+setting("max_odds",0) || ""}" placeholder="no limit"></label><span></span></div>
       <div class="acts"><button class="btn primary" data-act="save-settings">Save settings</button>
       <button class="btn ghost" data-act="signout" style="margin-left:auto">Sign out</button></div></div></section>`;
 }
 async function saveSettings(){
   const rows = [["bankroll", +$("setBankroll").value], ["kelly_fraction", +$("setKelly").value],
-    ["stake_cap_pct", (+$("setCap").value)/100], ["min_edge_pct", +$("setMin").value]].map(([key, value]) => ({ key, value }));
+    ["stake_cap_pct", (+$("setCap").value)/100], ["min_edge_pct", +$("setMin").value], ["max_odds", +$("setMaxOdds").value || 0]].map(([key, value]) => ({ key, value }));
   const u = await sb.from("settings").upsert(rows);
   if (u.error) return toast("Not saved: " + u.error.message);
   rows.forEach(r => S.settings[r.key] = r.value); toast("Settings saved"); render();
