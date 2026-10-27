@@ -211,11 +211,18 @@ function kelly(odds, fair, book){
 function edgePct(odds, fair){ return (fair > 0 && odds > 0) ? (odds/fair - 1) * 100 : 0; }
 function selKey(x){ return `${x.event_id}|${x.market}|${x.outcome}|${x.line === null || x.line === undefined ? "" : +x.line}`; }
 function openBets(){ return S.bets.filter(b => !b.result); }
+// currency: stakes are entered in the book's own currency; € figures use the rate saved with each bet
+function curOf(book){ const b = typeof book === "string" ? bookObj(book) : book; return (b && b.currency) || "EUR"; }
+function fxOf(book){ return curOf(book) === "GBP" ? +setting("gbp_eur", 1.15) : 1; }
+function sym(c){ return c === "GBP" ? "£" : "€"; }
+function sE(b){ return (+b.stake) * (+b.fx || 1); }                 // stake in €
+function pE(b){ return (+b.profit || 0) * (+b.fx || 1); }           // profit in €
+function money(b){ const c = b.currency || "EUR"; return c === "EUR" ? `€${(+b.stake).toFixed(2)}` : `${sym(c)}${(+b.stake).toFixed(2)} (€${sE(b).toFixed(2)})`; }
 
 // ====================================================================== POSITION (same match, more than one bet)
 const NO_DRAW = /^(basketball|americanfootball|baseball|icehockey|tennis|mma|boxing)/;
 function betPL(b, m, t, home){            // profit of bet b if final margin (home-away) = m and total = t
-  const st = +b.stake, win = st * (+b.odds - 1), L = b.line === null || b.line === undefined ? null : +b.line;
+  const st = +b.stake * (+b.fx || 1), win = st * (+b.odds - 1), L = b.line === null || b.line === undefined ? null : +b.line;
   let x;                                   // >0 win, 0 push, <0 loss
   if (b.market === "h2h") x = b.outcome.toLowerCase() === "draw" ? (m === 0 ? 1 : -1) : (b.outcome === home ? m : -m);
   else if (b.market === "totals") x = b.outcome.toLowerCase().startsWith("over") ? t - L : L - t;
@@ -279,19 +286,20 @@ function posPanel(f){
   let odds, stake;
   if (st && st.mode === "accept"){ odds = num(st.odds); stake = st.stakeEdited ? num(st.stake) : kelly(odds, +f.fair_odds, st.book); }
   else { odds = mine[0] ? +mine[0].price : +f.flag_odds; stake = mine[0] ? +mine[0].stake : kelly(odds, +f.fair_odds, f.my_book); }
-  const nb = (odds > 1 && stake > 0) ? { market:f.market, outcome:f.outcome, line:f.line, odds, stake } : null;
+  const nbBook = (st && st.mode === "accept") ? st.book : (mine[0] ? mine[0].book : f.my_book);
+  const nb = (odds > 1 && stake > 0) ? { market:f.market, outcome:f.outcome, line:f.line, odds, stake, fx: fxOf(nbBook) } : null;
   const { held, rows } = positionRows(f, nb);
   if (!held.length) return "";
-  const worst = Math.min(...rows.map(r => r.with)), limit = 0.02 * (+setting("bankroll", 500));
+  const worst = Math.min(...rows.map(r => r.with)), fxN = nb ? nb.fx : 1, limit = 0.02 * (+setting("bankroll", 500));
   const c = v => v > 0.005 ? "pos" : v < -0.005 ? "neg" : "";
   const fmt = v => Math.abs(v) < 0.005 ? "€0" : sgn(v);
   return `<div class="ptbl">
-    <div class="held"><b>You hold:</b> ${held.map(b => `${esc(pickText(b))} @ ${(+b.odds).toFixed(2)} · €${(+b.stake).toFixed(2)} ${esc(b.book)}`).join("; ")}</div>
-    <table><thead><tr><th>If it ends</th><th>Now</th><th>${nb ? `+ this €${stake.toFixed(2)}` : "+ this"}</th></tr></thead><tbody>
+    <div class="held"><b>You hold:</b> ${held.map(b => `${esc(pickText(b))} @ ${(+b.odds).toFixed(2)} · ${money(b)} ${esc(b.book)}`).join("; ")}</div>
+    <table><thead><tr><th>If it ends</th><th>Now</th><th>${nb ? `+ this ${sym(curOf(nbBook))}${stake.toFixed(2)}` : "+ this"}</th></tr></thead><tbody>
     ${rows.map(r => `<tr class="${Math.abs(r.with - worst) < 0.005 ? "worst" : ""}"><td>${esc(r.label)}</td><td class="${c(r.now)}">${fmt(r.now)}</td><td class="${c(r.with)}">${fmt(r.with)}</td></tr>`).join("")}
     </tbody></table>
-    ${nb && worst < -limit - 0.005 ? (() => { const sMax = Math.floor((limit + Math.min(...rows.filter(r => r.loses).map(r => r.now))) * 100) / 100;
-      return `<div class="warn" style="margin-top:6px">Worst case is ${eur(worst)}, over your 2-unit limit of €${limit.toFixed(2)}. ${sMax >= 0.5 ? `Max stake to stay inside it: <b>€${sMax.toFixed(2)}</b>.` : "Skip this one."}</div>`; })() : ""}
+    ${nb && worst < -limit - 0.005 ? (() => { const sMax = Math.floor((limit + Math.min(...rows.filter(r => r.loses).map(r => r.now))) / fxN * 100) / 100;
+      return `<div class="warn" style="margin-top:6px">Worst case is ${eur(worst)}, over your 2-unit limit of €${limit.toFixed(2)}. ${sMax >= 0.5 ? `Max stake to stay inside it: <b>${sym(curOf(nbBook))}${sMax.toFixed(2)}</b>.` : "Skip this one."}</div>`; })() : ""}
   </div>`;
 }
 
@@ -316,12 +324,12 @@ async function refresh(quiet){
 // ====================================================================== header + tabs
 function renderHeader(){
   const settled = S.bets.filter(b => b.result);
-  const profit = settled.reduce((a,b) => a + (+b.profit || 0), 0);
+  const profit = settled.reduce((a,b) => a + pE(b), 0);
   const ob = openBets();
   const pend = S.flags.filter(f => new Date(f.commence_time) > new Date());
   $("tPending").textContent = pend.length;
   $("tOpen").textContent = ob.length;
-  $("tStake").textContent = "€" + Math.round(ob.reduce((a,b) => a + +b.stake, 0));
+  $("tStake").textContent = "€" + Math.round(ob.reduce((a,b) => a + sE(b), 0));
   const tp = $("tProfit"); tp.textContent = sgn(profit); tp.className = profit > 0 ? "pos" : profit < 0 ? "neg" : "";
   const n = $("nPending"); n.hidden = !pend.length; n.textContent = pend.length;
   $("subtitle").textContent = "bankroll €" + (+setting("bankroll", 500)).toFixed(0);
@@ -366,7 +374,7 @@ function flagCard(f, evOpen){
       <span class="edge">+${(+f.edge_pct).toFixed(1)}%</span></div>
     <div class="match">${esc(f.home)} v ${esc(f.away)}</div>
     <div class="pick"><b>${esc(pickText(f))}</b> · fair <span class="mono">${(+f.fair_odds).toFixed(3)}</span></div>
-    <div class="chips">${mine.map(m => `<span class="chip">★ ${esc(m.book)} <span class="mono">${(+m.price).toFixed(2)}</span> · €${(+m.stake).toFixed(2)}${m.capped ? " capped" : ""}</span>`).join("")}
+    <div class="chips">${mine.map(m => `<span class="chip">★ ${esc(m.book)} <span class="mono">${(+m.price).toFixed(2)}</span> · ${sym(curOf(m.book))}${(+m.stake).toFixed(2)}${m.capped ? " capped" : ""}</span>`).join("")}
       ${!mine.length ? `<span class="chip">${esc(f.feed_book)} <span class="mono">${(+f.flag_odds).toFixed(2)}</span></span>` : ""}
       ${hints.length ? `<span class="chip">check: ${esc(hints.join(", "))}</span>` : ""}</div>
     ${pos ? `<div id="pos-${f.id}">${posPanel(f)}</div>` : ""}
@@ -386,8 +394,8 @@ function acceptForm(f, st){
       <label>Price you got<input type="number" inputmode="decimal" step="0.01" data-f="odds" data-id="${f.id}" value="${odds ?? ""}"></label>
     </div>
     <div class="frow">
-      <label>Stake €<input type="number" inputmode="decimal" step="0.01" data-f="stake" data-id="${f.id}" value="${stake ?? ""}"></label>
-      <label>Edge<span class="calc" id="calc-${f.id}" style="padding-top:9px">${e.toFixed(2)}% · Kelly €${auto.toFixed(2)}${b && b.max_win ? ` (cap €${b.max_win} win)` : ""}</span></label>
+      <label>Stake ${sym(curOf(st.book))}<input type="number" inputmode="decimal" step="0.01" data-f="stake" data-id="${f.id}" value="${stake ?? ""}"></label>
+      <label>Edge<span class="calc" id="calc-${f.id}" style="padding-top:9px">${e.toFixed(2)}% · Kelly ${sym(curOf(st.book))}${auto.toFixed(2)}${b && b.max_win ? ` (cap ${sym(curOf(st.book))}${b.max_win} win)` : ""}</span></label>
     </div>
     <label class="check"><input type="checkbox" data-f="capped" data-id="${f.id}" ${st.capped ? "checked" : ""}> Book cut my stake</label>
     ${st.capped ? `<label>Max the book offered €<input type="number" inputmode="decimal" step="0.01" data-f="max" data-id="${f.id}" value="${st.max ?? ""}"></label>` : ""}
@@ -400,7 +408,7 @@ async function doAccept(f){
   const odds = +st.odds, stake = st.stakeEdited ? +st.stake : kelly(odds, +f.fair_odds, st.book);
   const row = { flag_id:f.id, event_id:f.event_id, sport_key:f.sport_key, sport_title:f.sport_title, commence_time:f.commence_time,
     home:f.home, away:f.away, market:f.market, outcome:f.outcome, line:f.line, book:st.book,
-    flag_odds:f.flag_odds, fair_odds:f.fair_odds, odds, stake, capped:!!st.capped, max_offered: st.capped ? num(st.max) : null,
+    flag_odds:f.flag_odds, fair_odds:f.fair_odds, odds, stake, currency:curOf(st.book), fx:fxOf(st.book), capped:!!st.capped, max_offered: st.capped ? num(st.max) : null,
     notes: st.book !== f.my_book ? `flagged at ${f.feed_book}` : null };
   const r = await sb.from("bets").insert(row).select();
   if (r.error) return toast("Not saved: " + r.error.message);
@@ -408,7 +416,7 @@ async function doAccept(f){
   if (u.error) toast("Bet saved, flag not updated: " + u.error.message);
   delete S.open[f.id];
   S.bets.unshift(r.data[0]); S.flags = S.flags.filter(x => x.id !== f.id);
-  toast(`Logged: ${pickText(f)} @ ${odds} · €${stake.toFixed(2)} ${st.book}`);
+  toast(`Logged: ${pickText(f)} @ ${odds} · ${sym(curOf(st.book))}${stake.toFixed(2)} ${st.book}`);
   render();
 }
 async function doDecline(f, reason){
@@ -426,8 +434,8 @@ function viewFixtures(){
     .sort((a,b) => new Date(a.commence_time) - new Date(b.commence_time));
   const d = new Date(day + "T12:00:00");
   const label = d.toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"short" });
-  const staked = bets.reduce((a,b) => a + +b.stake, 0);
-  const pl = bets.filter(b => b.result).reduce((a,b) => a + +b.profit, 0);
+  const staked = bets.reduce((a,b) => a + sE(b), 0);
+  const pl = bets.filter(b => b.result).reduce((a,b) => a + pE(b), 0);
   const settled = bets.filter(b => b.result).length;
   let html = `<div class="daynav"><button class="iconbtn" data-act="day" data-d="-1" aria-label="Previous day">‹</button>
     <b>${esc(label)}</b><button class="iconbtn" data-act="day" data-d="1" aria-label="Next day">›</button></div>
@@ -441,21 +449,21 @@ function viewFixtures(){
                   ["Overnight", b => ko(b.commence_time).getHours() < 6]];
   for (const [name, fn] of groups){
     const arr = bets.filter(fn); if (!arr.length) continue;
-    html += `<section><h2><span>${name}</span><span>${arr.length} · €${arr.reduce((a,b)=>a + +b.stake,0).toFixed(2)}</span></h2><div class="list">${arr.map(betRow).join("")}</div></section>`;
+    html += `<section><h2><span>${name}</span><span>${arr.length} · €${arr.reduce((a,b)=>a + sE(b),0).toFixed(2)}</span></h2><div class="list">${arr.map(betRow).join("")}</div></section>`;
   }
   return html;
 }
 function betRow(b){
   const started = new Date(b.commence_time) <= new Date();
   const r = b.result || "";
-  const toWin = (+b.stake) * (+b.odds - 1);
-  const ret = r ? `${+b.profit >= 0 ? "+" : ""}${eur(+b.profit)}` : `<span class="calc">to win</span> €${toWin.toFixed(2)}`;
+  const toWin = sE(b) * (+b.odds - 1);
+  const ret = r ? `${pE(b) >= 0 ? "+" : ""}${eur(pE(b))}` : `<span class="calc">to win</span> €${toWin.toFixed(2)}`;
   const editing = S.open["bet-" + b.id];
   return `<div class="card ${r} ${started && !r ? "started" : ""}">
     <div class="row">
       <div class="time">${hhmm(b.commence_time)}<small>${r ? "" : started ? "started" : (bettingDay(b.commence_time) !== localISO(ko(b.commence_time)) ? ko(b.commence_time).toLocaleDateString("en-GB",{weekday:"short"}) : "")}</small></div>
       <div style="min-width:0"><div class="match">${esc(b.home)} v ${esc(b.away)}</div>
-        <div class="meta" style="margin-top:2px"><span class="tag">${esc(b.sport_title || "")}</span><span><b style="color:var(--fg)">${esc(pickText(b))}</b> @ ${(+b.odds).toFixed(2)}</span><span class="mono">€${(+b.stake).toFixed(2)} · ${esc(b.book)}</span>${b.settled_by === "auto" ? '<span class="tag">auto</span>' : ""}</div></div>
+        <div class="meta" style="margin-top:2px"><span class="tag">${esc(b.sport_title || "")}</span><span><b style="color:var(--fg)">${esc(pickText(b))}</b> @ ${(+b.odds).toFixed(2)}</span><span class="mono">${money(b)} · ${esc(b.book)}</span>${b.settled_by === "auto" ? '<span class="tag">auto</span>' : ""}</div></div>
       <div class="res"><div class="ret">${ret}</div>
         <div class="wl"><button class="w" data-act="res" data-id="${b.id}" data-r="W" aria-label="Won">W</button><button class="l" data-act="res" data-id="${b.id}" data-r="L" aria-label="Lost">L</button><button class="iconbtn" style="height:30px;padding:0 8px" data-act="edit-bet" data-id="${b.id}" aria-label="More">⋯</button></div></div>
     </div>
@@ -465,7 +473,7 @@ function betEditor(b){
   const e = S.open["bet-" + b.id];
   return `<div class="form">
     <div class="frow"><label>Price<input type="number" step="0.01" inputmode="decimal" data-bf="odds" data-id="${b.id}" value="${e.odds}"></label>
-      <label>Stake €<input type="number" step="0.01" inputmode="decimal" data-bf="stake" data-id="${b.id}" value="${e.stake}"></label></div>
+      <label>Stake ${sym(curOf(e.book))}<input type="number" step="0.01" inputmode="decimal" data-bf="stake" data-id="${b.id}" value="${e.stake}"></label></div>
     <div class="frow"><label>Book<select data-bf="book" data-id="${b.id}">${S.books.map(x => `<option ${x.name === e.book ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></label>
       <label>Result<select data-bf="result" data-id="${b.id}">${[["","Open"],["W","Won"],["L","Lost"],["P","Push"],["V","Void"]].map(([v,t]) => `<option value="${v}" ${v === (e.result||"") ? "selected" : ""}>${t}</option>`).join("")}</select></label></div>
     <div class="acts"><button class="btn primary" data-act="save-bet" data-id="${b.id}">Save</button>
@@ -481,7 +489,9 @@ async function setResult(id, r){
 }
 async function saveBet(id){
   const e = S.open["bet-" + id];
+  const b0 = S.bets.find(x => x.id == id);
   const patch = { odds:+e.odds, stake:+e.stake, book:e.book, result:e.result || null,
+    ...(b0 && b0.book !== e.book ? { currency:curOf(e.book), fx:fxOf(e.book) } : {}),
     settled_at: e.result ? new Date().toISOString() : null, settled_by: e.result ? "manual" : null };
   const u = await sb.from("bets").update(patch).eq("id", id).select();
   if (u.error) return toast("Not saved: " + u.error.message);
@@ -537,13 +547,13 @@ function grp(arr, keyFn){ const m = new Map(); for (const b of arr){ const k = k
 function statRow(name, arr){
   const s = arr.filter(b => b.result === "W" || b.result === "L");
   const w = s.filter(b => b.result === "W").length;
-  const staked = s.reduce((a,b) => a + +b.stake, 0);
-  const pl = arr.filter(b => b.result).reduce((a,b) => a + +b.profit, 0);
-  const ev = s.reduce((a,b) => a + (+b.stake) * ((+b.odds)/(+b.fair_odds || +b.odds) - 1), 0);
+  const staked = s.reduce((a,b) => a + sE(b), 0);
+  const pl = arr.filter(b => b.result).reduce((a,b) => a + pE(b), 0);
+  const ev = s.reduce((a,b) => a + sE(b) * ((+b.odds)/(+b.fair_odds || +b.odds) - 1), 0);
   const open = arr.filter(b => !b.result);
   return `<tr><td>${esc(name)}</td><td>${arr.length}</td><td>${s.length ? Math.round(100*w/s.length) + "%" : "–"}</td>
     <td class="${pl > 0 ? "pos" : pl < 0 ? "neg" : ""}">${sgn(pl)}</td><td>${staked ? (100*pl/staked).toFixed(1) + "%" : "–"}</td>
-    <td>${sgn(ev)}</td><td>${open.length}</td><td>€${open.reduce((a,b)=>a + +b.stake,0).toFixed(0)}</td></tr>`;
+    <td>${sgn(ev)}</td><td>${open.length}</td><td>€${open.reduce((a,b)=>a + sE(b),0).toFixed(0)}</td></tr>`;
 }
 function table(title, map, order){
   const keys = order ? order.filter(k => map.has(k)) : [...map.keys()].sort((a,b) => map.get(b).length - map.get(a).length);
@@ -554,11 +564,11 @@ function viewSummary(){
   const all = S.bets;
   const s = all.filter(b => b.result === "W" || b.result === "L");
   const w = s.filter(b => b.result === "W").length;
-  const staked = s.reduce((a,b) => a + +b.stake, 0);
-  const pl = all.filter(b => b.result).reduce((a,b) => a + +b.profit, 0);
-  const ev = s.reduce((a,b) => a + (+b.stake) * ((+b.odds)/(+b.fair_odds || +b.odds) - 1), 0);
+  const staked = s.reduce((a,b) => a + sE(b), 0);
+  const pl = all.filter(b => b.result).reduce((a,b) => a + pE(b), 0);
+  const ev = s.reduce((a,b) => a + sE(b) * ((+b.odds)/(+b.fair_odds || +b.odds) - 1), 0);
   const expW = s.reduce((a,b) => a + (b.fair_odds ? 1/(+b.fair_odds) : 0), 0);
-  const open = openBets(); const openSt = open.reduce((a,b) => a + +b.stake, 0);
+  const open = openBets(); const openSt = open.reduce((a,b) => a + sE(b), 0);
   const br = +setting("bankroll", 500);
   const band = b => { const e = +b.edge_pct; return e < 2 ? "Under 2%" : e < 3 ? "2–3%" : e < 5 ? "3–5%" : "5%+"; };
   const oband = b => { const o = +b.odds; return o < 2 ? "Under 2.00" : o < 3 ? "2.00–2.99" : o < 5 ? "3.00–4.99" : "5.00+"; };
@@ -579,13 +589,14 @@ function viewSummary(){
       <label>Kelly fraction<input type="number" step="0.1" id="setKelly" value="${+setting("kelly_fraction",1)}"></label></div>
       <div class="frow"><label>Stake cap (% of bankroll)<input type="number" step="0.1" id="setCap" value="${(+setting("stake_cap_pct",0.02))*100}"></label>
       <label>Minimum edge %<input type="number" step="0.1" id="setMin" value="${+setting("min_edge_pct",1)}"></label></div>
-      <div class="frow"><label>Max odds (flag prices under)<input type="number" step="0.01" id="setMaxOdds" value="${+setting("max_odds",0) || ""}" placeholder="no limit"></label><span></span></div>
+      <div class="frow"><label>Max odds (flag prices under)<input type="number" step="0.01" id="setMaxOdds" value="${+setting("max_odds",0) || ""}" placeholder="no limit"></label>
+      <label>£ → € rate<input type="number" step="0.01" id="setFx" value="${+setting("gbp_eur",1.15)}"></label></div>
       <div class="acts"><button class="btn primary" data-act="save-settings">Save settings</button>
       <button class="btn ghost" data-act="signout" style="margin-left:auto">Sign out</button></div></div></section>`;
 }
 async function saveSettings(){
   const rows = [["bankroll", +$("setBankroll").value], ["kelly_fraction", +$("setKelly").value],
-    ["stake_cap_pct", (+$("setCap").value)/100], ["min_edge_pct", +$("setMin").value], ["max_odds", +$("setMaxOdds").value || 0]].map(([key, value]) => ({ key, value }));
+    ["stake_cap_pct", (+$("setCap").value)/100], ["min_edge_pct", +$("setMin").value], ["max_odds", +$("setMaxOdds").value || 0], ["gbp_eur", +$("setFx").value || 1.15]].map(([key, value]) => ({ key, value }));
   const u = await sb.from("settings").upsert(rows);
   if (u.error) return toast("Not saved: " + u.error.message);
   rows.forEach(r => S.settings[r.key] = r.value); toast("Settings saved"); render();
@@ -597,7 +608,7 @@ function liveAccept(id){
   const odds = num(st.odds), fair = +f.fair_odds, auto = kelly(odds, fair, st.book);
   const stake = st.stakeEdited ? num(st.stake) : auto, e = edgePct(odds || 0, fair), b = bookObj(st.book);
   const si = document.querySelector(`[data-f="stake"][data-id="${id}"]`); if (si && !st.stakeEdited) si.value = auto || "";
-  const c = $("calc-" + id); if (c) c.textContent = `${e.toFixed(2)}% · Kelly €${auto.toFixed(2)}${b && b.max_win ? ` (cap €${b.max_win} win)` : ""}`;
+  const c = $("calc-" + id); if (c) c.textContent = `${e.toFixed(2)}% · Kelly ${sym(curOf(st.book))}${auto.toFixed(2)}${b && b.max_win ? ` (cap ${sym(curOf(st.book))}${b.max_win} win)` : ""}`;
   const w = $("lowedge-" + id); if (w) w.innerHTML = odds && e < 1 ? `<div class="warn">Edge is ${e.toFixed(2)}%, under 1% at this price. Usually a decline.</div>` : "";
   const cb = $("confirm-" + id); if (cb) cb.disabled = !(odds > 1) || !(stake > 0);
   const box = $("pos-" + id); if (box) box.innerHTML = posPanel(f);
